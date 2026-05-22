@@ -101,7 +101,7 @@ def get_predictions(model, loader, device):
     all_probs = []
 
     for images, labels in loader:
-        images = images.to(device)
+        images = images.to(device, non_blocking=True)
         outputs = model(images)
         probs = torch.softmax(outputs, dim=1)
 

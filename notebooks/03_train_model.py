@@ -25,6 +25,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.data import WeightedRandomSampler
+from torch.cuda.amp import GradScaler, autocast  # ← AMP
 from torchvision import datasets, transforms, models
 import matplotlib
 matplotlib.use('Agg')
@@ -62,8 +63,11 @@ def set_seed(seed=SEED):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    # deterministic=False + benchmark=True: lets cuDNN pick the fastest
+    # algorithm for your GPU. ~15-20% faster than deterministic mode.
+    # We still get reproducibility via the seeds above for weight init.
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -110,11 +114,11 @@ def get_dataloaders(data_dir, train_tfm, val_tfm, batch_size=32):
 
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, sampler=sampler,
-        num_workers=2, pin_memory=True
+        num_workers=4, pin_memory=True, persistent_workers=True
     )
     val_loader = DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=2, pin_memory=True
+        num_workers=4, pin_memory=True, persistent_workers=True
     )
 
     print(f"  Train: {len(train_dataset)} images, {len(train_loader)} batches")
@@ -209,8 +213,8 @@ def count_parameters(model):
 # TRAINING LOOP
 # ═══════════════════════════════════════════════════════════════════
 
-def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
-    """Train for one epoch. Returns average loss and accuracy."""
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
+    """Train for one epoch using AMP (Automatic Mixed Precision)."""
     model.train()
 
     # Keep frozen BN layers in eval (called every epoch because model.train() resets it)
@@ -225,17 +229,24 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
     total = 0
 
     for batch_idx, (images, labels) in enumerate(loader):
-        images, labels = images.to(device), labels.to(device)
+        images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
 
-        # Gradient clipping — prevent gradient explosions
+        # AMP autocast: runs forward pass in float16 on Tensor Cores
+        with autocast(enabled=scaler.is_enabled()):
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+        # Scaler handles backward pass safely in float16
+        scaler.scale(loss).backward()
+
+        # Unscale before gradient clipping (required with AMP)
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         running_loss += loss.item() * images.size(0)
         _, predicted = outputs.max(1)
@@ -271,7 +282,7 @@ def validate(model, loader, criterion, device):
 
 
 def train_stage(model, train_loader, val_loader, criterion, optimizer, scheduler,
-                device, num_epochs, stage_name, model_save_path, patience=7):
+                device, scaler, num_epochs, stage_name, model_save_path, patience=7):
     """
     Run a complete training stage with early stopping.
     Returns training history and best model state_dict.
@@ -298,7 +309,7 @@ def train_stage(model, train_loader, val_loader, criterion, optimizer, scheduler
     for epoch in range(num_epochs):
         start = time.time()
 
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch)
+        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch)
         val_loss, val_acc = validate(model, val_loader, criterion, device)
 
         current_lr = optimizer.param_groups[0]['lr']
@@ -411,12 +422,15 @@ def train_model(model_name, data_dir, output_dir, model_dir, device):
 
     # Setup
     train_tfm, val_tfm = get_transforms(input_size=224)
-    train_loader, val_loader, class_names = get_dataloaders(data_dir, train_tfm, val_tfm, batch_size=32)
+    train_loader, val_loader, class_names = get_dataloaders(data_dir, train_tfm, val_tfm, batch_size=64)
 
     # Build model
     model, backbone_name = build_model(model_name, num_classes=NUM_CLASSES)
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
+
+    # AMP scaler — enabled only on CUDA, no-op on CPU
+    scaler = GradScaler(enabled=device.type == "cuda")
 
     model_save_path = model_dir / f"best_{model_name}.pth"
 
@@ -430,11 +444,11 @@ def train_model(model_name, data_dir, output_dir, model_dir, device):
 
     history_s1 = train_stage(
         model, train_loader, val_loader, criterion,
-        optimizer_s1, scheduler_s1, device,
+        optimizer_s1, scheduler_s1, device, scaler,
         num_epochs=10,
         stage_name=f"Stage 1: Feature Extraction ({model_name})",
         model_save_path=model_save_path,
-        patience=10,  # Don't early-stop stage 1 (it's short)
+        patience=10,
     )
 
     # ── Stage 2: Fine-Tuning (Partial Unfreeze) ──
@@ -457,7 +471,7 @@ def train_model(model_name, data_dir, output_dir, model_dir, device):
 
     history_s2 = train_stage(
         model, train_loader, val_loader, criterion,
-        optimizer_s2, scheduler_s2, device,
+        optimizer_s2, scheduler_s2, device, scaler,
         num_epochs=20,
         stage_name=f"Stage 2: Fine-Tuning ({model_name})",
         model_save_path=model_save_path,
@@ -498,6 +512,9 @@ def main():
     if torch.cuda.is_available():
         print(f"   GPU: {torch.cuda.get_device_name(0)}")
         print(f"   VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        print(f"   AMP: Enabled (float16 Tensor Cores)")
+    else:
+        print(f"   AMP: Disabled (CPU mode)")
 
     # Verify data directory
     if not DATA_DIR.exists():
