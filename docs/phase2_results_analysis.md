@@ -1,192 +1,291 @@
-# Replastify — Phase 2 Result Analysis
-**Run Date:** 2026-05-22 | **GPU:** Tesla T4 (15.6 GB VRAM) | **Dataset:** 1834 train / 226 val / 235 test
+# Replastify — Phase 2: Deep Result Analysis & Critical Review
+**Run Date:** 2026-05-22 | **GPU:** Tesla T4 | **Total Training Time:** 14.4 min
 
 ---
 
-## 1. Executive Summary
+## 1. The 60-Second Summary
 
-Both models completed training in **14.4 minutes total** on a Kaggle T4 GPU. **EfficientNet-B0 is the clear winner** on all primary metrics despite having 5.5× fewer parameters than ResNet50, confirming our architecture hypothesis.
+Both models finished training and hit "good" accuracy numbers on paper. **But before declaring success, we need to be honest about what these numbers actually mean** — and what they don't. This document takes a critical, ground-level look at every result.
 
-| Metric | EfficientNet-B0 | ResNet50 | Winner |
+| Metric | EfficientNet-B0 | ResNet50 |
+|---|---|---|
+| Test Accuracy | 88.94% | 87.23% |
+| **Macro F1** | **0.8641** | 0.8278 |
+| Cohen's Kappa | 0.8636 | 0.8422 |
+| Top-3 Accuracy | 97.45% | 97.87% |
+| Worst-class F1 (PP) | 0.6061 | **0.4286 ❌** |
+
+**Winner: EfficientNet-B0.** Deployed model going forward.
+
+---
+
+## 2. Which Metric Actually Matters for Replastify?
+
+This is the most important question to answer before reading anything else. Different metrics tell different stories, and for a recycling guidance app, **not all stories are equally important**.
+
+### The Case AGAINST Using Accuracy as the Primary Metric
+Accuracy counts all 235 test images equally. But our test set is not balanced:
+- LDPE: 53 images (22.6%)
+- PS: 50 images (21.3%)
+- HDPE: 51 images (21.7%)
+- **PP: only 16 images (6.8%)**
+
+If the model perfectly identifies every LDPE, PS, and HDPE image but completely fails on PP, it still scores ~65% accuracy and looks acceptable. **Accuracy masks minority class failure.** Reporting 88.94% accuracy without context is actively misleading for this dataset.
+
+### The Primary Metric: Macro F1
+**Macro F1 is the most honest single-number summary for Replastify.** It calculates F1 separately for each of the 6 plastic types and averages them with equal weight — PP (16 test samples) counts exactly as much as LDPE (53 samples). Our EfficientNet Macro F1 of **0.8641** means: averaged across all 6 plastic types equally, the model achieves 86.4% harmonic-mean of precision and recall.
+
+### When to Use Each Metric
+
+| Metric | What It Captures | Use When |
+|---|---|---|
+| **Macro F1** | Equal-weight performance across all classes | **Primary metric for Replastify** |
+| **Cohen's Kappa** | Agreement above random chance | Cross-paper comparison, research reporting |
+| **Weighted F1** | Performance weighted by class frequency | When class distribution mirrors real-world usage |
+| **Accuracy** | Overall correct rate | Only when classes are balanced (they aren't here) |
+| **Per-class F1** | Individual plastic type performance | Diagnosing which plastics to improve |
+| **Top-3 Accuracy** | Whether correct answer is in top 3 | For UI/UX "suggestions" feature |
+
+> **Conclusion:** Report **Macro F1** as the headline metric. Accuracy is a supporting number only.
+
+---
+
+## 3. Is the 88.94% Accuracy Real? A Critical Examination
+
+This is the most important skeptical question to ask. Let's examine it from multiple angles.
+
+### 3.1 — Statistical Reliability of the Test Set (The Biggest Concern)
+
+The test set has only **235 images**. This is statistically very small for a 6-class classification problem.
+
+**For PP specifically:** The test set has **only 16 PP images.** When EfficientNet gets F1=0.606 on PP, that means roughly 10 images correct and 6 wrong. If 2 of those wrong predictions were different, the F1 would jump to ~0.73 or drop to ~0.48. **A result based on 16 samples has extremely high variance and cannot be trusted as a stable estimate.**
+
+A rule of thumb in ML is to have at least 100 test samples per class for reliable per-class metrics. We have 16 for PP. This means the PP F1 number could swing wildly on a different test split.
+
+**For overall accuracy:** With 235 test samples, the 95% confidence interval for our 88.94% accuracy is approximately **±2.0% to ±3.0%**. The "true" underlying accuracy of this model could realistically be anywhere from ~86% to ~92%. The single number "88.94%" implies false precision.
+
+### 3.2 — Dataset Scope (Distribution Gap)
+
+The 2,295 images came from a curated academic/research dataset. We do not know exactly how they were collected, but common issues with plastic datasets include:
+- Images taken in controlled lighting (lab or bright studio conditions)
+- Plastics photographed clean, unwrapped, and isolated on plain backgrounds
+- Limited variety of plastic shapes (mostly bottles, limited to bags, sheets, containers)
+
+**Real-world photos** (what users will take with their phones) will have:
+- Mixed/complex backgrounds (kitchen counter, garbage bin)
+- Dirty, crushed, or torn plastics
+- Partial objects (only half the bottle visible)
+- Varying lighting (dim, outdoor, harsh flash)
+- Multiple plastic items in one frame
+- Recycling code labels (which might help, but only if legible)
+
+**The honest expectation:** In production, this model will almost certainly perform 5–15% worse than the test set metrics suggest. This is called the **distribution gap** — the gap between the data distribution the model was trained and tested on, versus the real-world data distribution it will encounter.
+
+### 3.3 — Why the Accuracy Looks "High" Despite Limitations
+
+The numbers are genuinely high for this type of task. Why? Three legitimate reasons:
+
+1. **Transfer Learning works extremely well.** EfficientNet pretrained on 1.2 million ImageNet images already knows textures, surfaces, and material properties. Plastics share visual properties with hundreds of ImageNet categories (transparent objects, colored containers, flexible sheets). The model isn't starting from zero — it starts from a very informed position.
+
+2. **The test set is from the same distribution as training.** Because train/test came from the same curated dataset, the model has essentially "seen the style" of these images during training even if not the specific test images. This inflates results compared to true out-of-distribution testing.
+
+3. **Six classes with strong visual discriminators.** Some pairs are genuinely easy: LDPE (translucent flexible film) looks nothing like PS (rigid, often clear or white foam). PVC is noticeably different from HDPE. The model doesn't need to solve a hard fine-grained classification problem for all pairs.
+
+### 3.4 — The Unsettling Val-to-Test Drop
+
+| Model | Val Accuracy | Test Accuracy | Drop |
 |---|---|---|---|
-| **Test Accuracy** | **88.94%** | 87.23% | EffNet ✅ |
-| **Macro F1** | **0.8641** | 0.8278 | EffNet ✅ |
-| **Weighted F1** | **0.8909** | 0.8703 | EffNet ✅ |
-| **Cohen's Kappa** | **0.8636** | 0.8422 | EffNet ✅ |
-| Top-3 Accuracy | 0.9745 | **0.9787** | ResNet ✅ |
-| Parameters | **4.3M** | 24.0M | EffNet ✅ |
-| Model size | **~20 MB** | ~98 MB | EffNet ✅ |
+| EfficientNet-B0 | 91.15% | 88.94% | **−2.2%** |
+| ResNet50 | 91.59% | 87.23% | **−4.4%** |
 
-> **Verdict:** EfficientNet-B0 achieves better accuracy with 5.5× fewer parameters. It is the model to deploy.
+This gap is significant. It means the checkpoint we saved as "best" was partially tuned (by early stopping) to the specific 226 validation images. With only 226 val images, early stopping can accidentally overfit to validation noise. **The real model performance is closer to the test number, not the val number.**
 
 ---
 
-## 2. Training Dynamics — EfficientNet-B0
+## 4. Class Imbalance — The Central Issue
 
-### Stage 1: Feature Extraction (10 epochs, LR 1e-3)
-- **Only 7.6% of parameters were trained** (329K / 4.3M) — the frozen backbone acts as a fixed feature extractor.
-- **Epoch 1 immediately achieved 84.96% val accuracy.** This is the power of ImageNet transfer learning — the pre-trained features are immediately useful for plastics.
-- **Best val accuracy achieved at Epoch 5: 89.38%**
-- Epochs 6–10 show the model plateauing (val acc oscillates around 88.5%). This is expected — the frozen backbone limits how much the head alone can improve.
-- **Train/val gap is tight**: train=93.08% vs val=88.5% — minimal overfitting in Stage 1 because only the small head is being trained.
+This deserves its own section because it underlies almost every other concern.
 
-### Stage 2: Fine-Tuning (14 epochs, LR 1e-4 backbone / 1e-3 head)
-- **Trainable params jumped to 80.4%** (3.49M) — last 3 blocks of the backbone are now adapting.
-- **Epoch 1 of Stage 2 shows regression (87.61% val):** A small initial drop is normal. The newly unfrozen weights briefly "destabilize" the learned head mappings before settling.
-- **Best result at Epoch 7 (of Stage 2): 91.15% val accuracy** — the warm restart in the cosine scheduler aligned perfectly, producing the peak performance.
-- **Clear overfitting onset after Epoch 7:** Train accuracy climbed to 98.26% while val stuck at 89-91%. This is the classic signature of a small dataset (~2K images) being memorized.
-- **Early stopping fired correctly at Epoch 14**, saving the best checkpoint from Epoch 7.
-- **Val loss trend is concerning but normal:** Rose from 0.30 → 0.45 in the overfit zone. The saved model (Epoch 7) has val loss=0.326 which is acceptable.
+### The Imbalance in Numbers
+```
+Training samples per class:
+LDPE  ████████████████████████████████████████████   412  (22.5%)
+HDPE  ███████████████████████████████████           403  (22.0%)
+PS    ███████████████████████████████████           396  (21.6%)
+PET   █████████████████████████████              324  (17.7%)
+PVC   █████████████████               180   (9.8%)
+PP    ███████████              119   (6.5%)
+```
 
-### Key Observations
-- The cosine warm restart at Epoch 6 (LR jumps back to 1e-4) triggered the best epoch (7). This confirms the scheduler is doing its job — the temporary LR bump helped escape a local minimum.
-- Train acc reached 98.26% vs val 91.15% — a **7.1% train-val gap**. This is moderate overfitting. Acceptable for ~2K images, but improvement is possible.
+PP has **3.5× fewer training samples than LDPE.** Despite our WeightedRandomSampler forcing equal class sampling per batch, the fundamental limitation is: there are only 119 different PP images the model can learn from. Augmentation helps but cannot generate genuinely new visual information — it just varies the same 119 images.
 
----
+### How Imbalance Corrupts Accuracy
 
-## 3. Training Dynamics — ResNet50
+If the model classifies every test image as LDPE (the majority class), accuracy would be:
+`53/235 = 22.6%` — obviously bad.
 
-### Stage 1: Feature Extraction (10 epochs, LR 1e-3)
-- **Only 2.2% of params trained** (526K / 24M) — because the frozen ResNet backbone is massive (24M params) but we only trained the tiny head (526K).
-- **Slower start**: Epoch 1 val=81.42% vs EfficientNet's 84.96%. ResNet's deeper architecture takes longer to adapt the head because the features are at a different scale/distribution.
-- Best at Epoch 5: **88.05% val accuracy**
-- Epochs 6–10 plateau similarly to EfficientNet.
+But here's the insidious part: **a model biased toward majority classes can still look impressive on accuracy.** Consider: LDPE+HDPE+PS account for 157 of 235 test images (66.8%). Getting those three classes right almost perfectly while failing badly on PP (16 images) gives roughly: `(53+51+50)/235 ≈ 65.5%` baseline just from the easy classes. The model only needs to do a bit more work to reach 88%. This is why per-class F1 on PP tells the real story.
 
-### Stage 2: Fine-Tuning (20 epochs, ran all)
-- **64.5% trainable params** (15.49M) — unfreezing Layer4 of ResNet50 adds a LOT of trainable params. This is dangerous for a ~2K dataset.
-- **Heavy and progressive overfitting is clearly visible:**
-  - Epoch 5: train=97.33%, val=90.71% (gap=6.6%)
-  - Epoch 10: train=98.47%, val=89.82% (gap=8.7%)
-  - Epoch 15: train=99.35%, val=89.82% (gap=9.5%)
-  - Final: train=99.18%, val=89.38% — while val loss explodes to 0.55
-- **Val loss becomes severely unstable:** Rose from 0.33 → 0.68 average in the second half, with a spike to **1.1323 at Epoch 17** — the worst recorded. This means the model was occasionally making very confident wrong predictions.
-- **Despite this, it finds its best at Epoch 19 (91.59% val)** — a lucky warm restart alignment pulled it up right at the end. This is fragile; the high val loss (0.675) means it's not a reliable checkpoint.
-- **Test set reality check:** Val accuracy was 91.59% but test accuracy was only 87.23% — a **4.36% drop**. This is the largest val-to-test gap of the two models, confirming the Epoch-19 checkpoint was partially lucky on the specific validation distribution.
+### The Test Set Imbalance Mirror
+
+The test set reflects the same imbalance:
+- PP: 16 samples (6.8% of test set)
+- LDPE: 53 samples (22.6% of test set)
+
+A model failing completely on PP loses at most 6.8% of accuracy points. This is why the accuracy number (88.94%) doesn't adequately punish PP failure, but Macro F1 (0.8641) does.
 
 ---
 
-## 4. Test Set Evaluation — Deep Per-Class Analysis
+## 5. Training Dynamics — What the Numbers Reveal
 
-### EfficientNet-B0 — Per-Class Breakdown
+### 5.1 EfficientNet-B0 — The Good and The Concerning
 
-| Class | Precision | Recall | F1 | Support | Diagnosis |
-|---|---|---|---|---|---|
-| **LDPE** | 0.9623 | 0.9623 | **0.9623** | 53 | 🟢 Excellent. Visually distinctive features learned well. |
-| **PVC** | 1.0000 | 0.9565 | **0.9778** | 23 | 🟢 Perfect precision — zero false alarms. |
-| **HDPE** | 0.8868 | 0.9216 | **0.9038** | 51 | 🟢 Strong. High recall means few HDPE items missed. |
-| **PS** | 0.9767 | 0.8400 | **0.9032** | 50 | 🟡 Great precision but 16% of PS items missed. Possible PET confusion. |
-| **PET** | 0.7872 | 0.8810 | **0.8315** | 42 | 🟡 Lower precision (21% false alarms). Likely confused with HDPE/PVC. |
-| **PP** | 0.5882 | 0.6250 | **0.6061** | 16 | 🔴 Weakest class. Only 16 test samples and 119 training samples. |
+**Stage 1 (Feature Extraction) — Healthy behavior:**
+- Epoch 1 immediately hit 84.96% val accuracy. This is the power of ImageNet pretraining — the frozen features are already plastic-relevant without any task-specific training.
+- Train (93.1%) ≈ Val (88.9%) at end of Stage 1 → minimal overfitting when only the small head trains.
 
-**PP Analysis:** F1=0.606 is above our "minimum viable" threshold of 0.55 but below "good" (0.70). With only 119 training images (vs 412 for LDPE), this gap is mathematically expected. Adding ~150–200 more PP images would likely push this above 0.75.
+**Stage 2 (Fine-Tuning) — Overfitting is clearly present:**
+```
+Epoch  7: train=95.58%, val=91.15%  ← Best saved checkpoint (gap: 3.6%)
+Epoch 14: train=97.87%, val=89.82%  ← Early stopped here (gap: 8.1%)
+```
 
-**PS Analysis:** Recall=0.840 means 8 out of 50 PS items were misclassified. Polystyrene can look similar to HDPE (both opaque white/grey). The high precision (97.67%) means when the model does say "PS", it's almost always right.
+The train accuracy climbed from 88% → 98% while val accuracy did not follow. This is the textbook definition of overfitting. Early stopping correctly caught this, but the 7-epoch patience window means the model was still allowed to overfit considerably before stopping.
 
-**PVC Analysis:** Precision=1.000 is remarkable — zero false positive PVC predictions. The model has learned very strong PVC-specific features (likely the flexibility/clarity cues).
+**The val loss divergence is especially revealing:**
+```
+Stage 2, Epoch 7:  val_loss = 0.3259  ← Best checkpoint
+Stage 2, Epoch 14: val_loss = 0.4548  ← Where we stopped
+```
+Val loss increased by 40% after the peak. This means the model was becoming increasingly miscalibrated — more confidently wrong on certain images. The saved model (Epoch 7) is fine, but this trajectory warns that the model has limited capacity to improve further on this dataset without more data.
 
-### ResNet50 — Per-Class Breakdown
+### 5.2 ResNet50 — The Red Flags
 
-| Class | Precision | Recall | F1 | Support | Diagnosis |
-|---|---|---|---|---|---|
-| **HDPE** | 0.9783 | 0.8824 | **0.9278** | 51 | 🟢 High precision but misses 12% of HDPE items. |
-| **LDPE** | 0.8929 | 0.9434 | **0.9174** | 53 | 🟢 Good but slightly lower than EfficientNet. |
-| **PVC** | 1.0000 | 0.9565 | **0.9778** | 23 | 🟢 Same as EfficientNet — PVC is easy to identify. |
-| **PS** | 0.9167 | 0.8800 | **0.8980** | 50 | 🟡 Similar to EfficientNet. |
-| **PET** | 0.7451 | 0.9048 | **0.8172** | 42 | 🟡 Higher recall than EfficientNet but even lower precision. |
-| **PP** | 0.5000 | **0.3750** | **0.4286** | 16 | 🔴 **FAILING.** F1=0.4286 is below our 0.50 red flag threshold. ResNet misses 62.5% of PP items. |
+ResNet50's Stage 2 shows more alarming patterns:
 
-**PP is ResNet50's critical failure.** Recall=0.375 means only 6 out of 16 PP test items were correctly identified. The remaining 10 were silently misclassified as other plastics. This directly explains why ResNet's Macro F1 (0.8278) is much lower than EfficientNet's (0.8641) — one failing class drags the macro average significantly.
+```
+Epoch  5: train=97.33%, val=90.71%,  val_loss=0.315
+Epoch 10: train=98.47%, val=89.82%,  val_loss=0.525
+Epoch 17: train=98.80%, val=84.51%,  val_loss=1.132  ← Spike
+Epoch 19: train=98.96%, val=91.59%,  val_loss=0.675  ← Best saved
+```
 
----
+**Epoch 17 is a major red flag.** Val accuracy dropped to 84.51% while val loss spiked to 1.132 — this means the model made extremely confident wrong predictions on a batch of validation images. This is catastrophic miscalibration. The model "recovered" at Epoch 19 only because the cosine warm restart dropped the LR back down.
 
-## 5. Model Comparison — Head-to-Head
+**The best checkpoint at Epoch 19 is fragile.** It achieved 91.59% val accuracy but with val_loss=0.675 — meaning even correct predictions had high uncertainty. The test accuracy drop (91.59% → 87.23%) confirms the val result was partially a statistical artifact.
 
-### Where EfficientNet Wins (Primary Metrics)
-- **Macro F1: 0.8641 vs 0.8278** — 3.6% better. This is large for a classification task.
-- **PP class F1: 0.606 vs 0.429** — EfficientNet is dramatically better at the hardest class. This is due to its Squeeze-and-Excitation attention mechanism that can focus on subtle texture differences.
-- **Generalization gap (val → test): 91.15% → 88.94% = 2.2% drop.** Very acceptable.
-- **Cohen's Kappa: 0.8636 vs 0.8422** — EfficientNet agrees with ground truth substantially more, adjusted for chance.
-
-### Where ResNet Wins (Secondary Metrics)
-- **Top-3 Accuracy: 0.9787 vs 0.9745** — ResNet keeps the correct answer in its top 3 guesses slightly more often. This is because ResNet's larger feature space (2048-dim vs 1280-dim) can sometimes "hedge" better even when the primary guess is wrong.
-- **HDPE F1: 0.9278 vs 0.9038** — ResNet identifies HDPE more precisely (fewer false HDPE predictions).
-
-### Generalization Analysis
-| Model | Best Val Acc | Test Acc | Drop | Verdict |
-|---|---|---|---|---|
-| EfficientNet-B0 | 91.15% | 88.94% | **−2.2%** | ✅ Healthy |
-| ResNet50 | 91.59% | 87.23% | **−4.4%** | ⚠️ Over-optimistic val |
-
-ResNet50's val→test gap is 2× larger. This confirms the val accuracy at Epoch 19 was partially luck (the model happened to perform well on those specific 226 validation images while being heavily overfit overall).
+**Why is ResNet50 overfitting harder?**
+Unfreezing Layer4 alone adds **15.49M trainable parameters** trained on only 1,834 images. That's 8,416 parameters per training image — an extreme capacity-to-data ratio. EfficientNet's more efficient architecture unfreezes fewer effective parameters relative to its capacity.
 
 ---
 
-## 6. Overfitting Assessment
+## 6. Limitations — Honest Assessment
 
-| Model | Final Train Acc | Best Val Acc | Gap | Assessment |
-|---|---|---|---|---|
-| EfficientNet-B0 | 97.87% (Ep14) | 91.15% (Ep7) | 6.7% | ⚠️ Moderate overfitting |
-| ResNet50 | 99.18% (Ep20) | 91.59% (Ep19) | 7.6% | ⚠️ Significant overfitting |
+### Limitation 1: Dataset Size is Critically Small
+2,295 total images across 6 classes is industry-standard "proof of concept" territory. Real-world production models for multi-class visual classification typically have tens of thousands of images per class. Everything here is valid research/academic work, but calling this "production-ready" without caveats would be dishonest.
 
-Both models overfit, but ResNet50 overfit more severely. The smoking gun is ResNet50's val loss: it kept rising (0.33 → 0.68 → 1.13) even as val accuracy occasionally improved — a sign the model was becoming increasingly **overconfident** on its correct answers while also making more confidently wrong predictions.
+### Limitation 2: Tiny Test Set Creates Unreliable Estimates
+235 test images (16 for PP) gives very high-variance per-class metrics. The numbers we see are one sample from a distribution of possible results depending on how the split was done. A different random seed in `02_split_dataset.py` would give meaningfully different metric values.
 
----
+### Limitation 3: No Out-of-Distribution Testing
+We have zero evidence of how the model performs on:
+- Real user photos taken with phones
+- Compressed or low-resolution images
+- Partially visible or occluded plastics
+- Multiple plastic types in one image
+- Plastics with printed labels, brands, or graphics covering the surface
 
-## 7. Benchmark Assessment vs. Phase 2 Targets
+### Limitation 4: Overfitting Present in Both Models
+Both models show ~7–8% train-val accuracy gap in Stage 2. While early stopping prevented catastrophic overfitting, the models have some level of memorization. More diverse training data would reduce this.
 
-| Metric | Target (Good) | EfficientNet-B0 | ResNet50 | Status |
-|---|---|---|---|---|
-| Overall Accuracy | >85% | 88.94% ✅ | 87.23% ✅ | Both pass |
-| Macro F1 | >0.82 | 0.8641 ✅ | 0.8278 ≈ | EffNet passes |
-| Worst-class F1 | >0.70 | 0.6061 ❌ | 0.4286 ❌ | Both fail on PP |
-| Cohen's Kappa | >0.80 | 0.8636 ✅ | 0.8422 ✅ | Both pass |
-| Top-3 Accuracy | >95% | 97.45% ✅ | 97.87% ✅ | Both pass |
+### Limitation 5: PP Class Is Not Production-Ready
+F1=0.606 for PP means the model misclassifies approximately 4 out of every 10 PP items it encounters. In a recycling application, this matters: PP (polypropylene) is commonly used in food containers, bottle caps, and straws — items that users are likely to scan.
 
-**The only failed benchmark is worst-class F1 on PP.** This is expected given PP has only 119 training images. It is not a model failure — it is a data limitation.
+### Limitation 6: Validation Set Used for Hyperparameter Selection = Overly Optimistic Val Metrics
+Our early stopping patience, LR schedule, and architecture choices were all tuned (at least mentally) while watching validation metrics. This means the val set is not truly "held out" — it influenced decisions. This is an accepted practice but means val metrics are slightly optimistic.
 
----
-
-## 8. Identified Issues & Recommended Next Steps
-
-### Issue 1 — PP class needs more data (Priority: High)
-- **Root cause:** 119 training images is simply not enough for a visually ambiguous class.
-- **Fix:** Collect 150–200 more PP images. A dataset expansion from 119 → 300 should push PP F1 from 0.61 → 0.75+.
-
-### Issue 2 — PET precision is low (Priority: Medium)
-- **Root cause:** PET (transparent bottles) is visually similar to both PVC (transparent sheets) and HDPE (translucent). The model generates 21% false PET predictions.
-- **Fix:** Try label smoothing (`label_smoothing=0.1`) or Mixup augmentation to soften decision boundaries between PET, PVC, and HDPE.
-
-### Issue 3 — ResNet50 val loss instability (Priority: Low — ResNet is not our deployed model)
-- **Root cause:** With 15.49M trainable params on 1834 images, the 2nd stage LR warm restart (1e-4) is too aggressive for this many params.
-- **Fix (if needed):** Reduce Stage 2 backbone LR to 5e-5 for ResNet50.
-
-### Issue 4 — Val → Test accuracy drop (Priority: Low)
-- EfficientNet drops 2.2% from val to test. This is acceptable but could be reduced by using the full train+val set for a final retraining pass before deployment.
+### Limitation 7: No Calibration Testing
+We have no measurement of how well the model's confidence (softmax probabilities) reflects its actual accuracy. A model that says "95% PET" should be right ~95% of the time. This is called **calibration**, and it matters a lot for user trust in the app. We haven't measured it.
 
 ---
 
-## 9. Deployment Decision
+## 7. What Could Be Better
 
-**Deploy: EfficientNet-B0 (`best_efficientnet_b0.pth`)**
+### 7.1 More Data — The Highest ROI Fix
+Collecting 200–300 more PP images alone would likely push PP F1 from 0.61 → 0.75+, and Macro F1 from 0.864 → 0.880+. Adding the same for PVC and PET would close the remaining gaps.
 
-| Reason | Detail |
-|---|---|
-| Higher Macro F1 | 0.8641 vs 0.8278 — treats all plastic types more fairly |
-| Better PP performance | F1=0.606 vs 0.429 — doesn't fail on minority class |
-| Smaller model | 20 MB vs 98 MB — faster API response times |
-| Better generalization | 2.2% val→test drop vs 4.4% for ResNet |
-| Production safety | Lower val loss (0.326) vs ResNet's unstable (0.675) |
+### 7.2 Reduce Early Stopping Patience
+The current patience=7 allowed EfficientNet to overfit for 7 epochs after its peak. Reducing to patience=5 would save the best model closer to its actual peak and reduce overfitting.
+
+### 7.3 Larger Test Set
+Before claiming final results, the test set should be expanded. Ideally: min 30 images per class, ideally 50+. Currently PP has 16, which is statistically insufficient.
+
+### 7.4 Test Time Augmentation (TTA)
+At evaluation, averaging predictions over multiple augmented versions of the same image (original + horizontal flip + slight zoom) typically gives 1–2% free accuracy boost without any retraining.
+
+### 7.5 Model Calibration / Temperature Scaling
+After training, applying temperature scaling to calibrate the model's confidence outputs would make the app more trustworthy. Users should see "60% confident — PET likely but consider PVC" rather than always seeing artificially inflated 95%+ confidences.
+
+### 7.6 K-Fold Cross-Validation for Robust Estimates
+Instead of one train/val/test split, running 5-fold cross-validation on the full dataset would give much more reliable metric estimates with confidence intervals — especially important for PP with its tiny sample size.
+
+### 7.7 Label Smoothing
+Adding `label_smoothing=0.1` to `CrossEntropyLoss` would prevent the model from becoming overconfident on training samples, which directly reduces overfitting and typically improves generalization by 0.5–1%.
 
 ---
 
-## 10. Phase 3 Readiness
+## 8. Per-Class Deep Dive — Why Each Class Performs as It Does
 
-| Item | Status |
-|---|---|
-| Best model file (`best_efficientnet_b0.pth`) | ✅ Ready |
-| Class mapping (`HDPE:0, LDPE:1, PET:2, PP:3, PS:4, PVC:5`) | ✅ Confirmed |
-| Input format (224×224 RGB, ImageNet normalized) | ✅ Confirmed |
-| Output format (6-class softmax probabilities) | ✅ Confirmed |
-| Confidence threshold for "uncertain" prediction | 🔲 Recommend ≥ 0.65 as minimum confidence |
+### LDPE — F1: 0.9623 (Excellent)
+Physically: LDPE is flexible, translucent film/bags. It has a very distinctive visual signature (soft, crinkly, semi-transparent). The model learned this well. High performance on LDPE partly inflates overall accuracy because it's also the most common class (53 test samples).
 
-> **Phase 3 (FastAPI Backend) can proceed using EfficientNet-B0. The model is production-ready for all classes except PP, which should be flagged as "lower confidence" to the end user until more PP data is collected.**
+### PVC — F1: 0.9778 (Excellent, Precision=1.000)
+Physically: PVC is rigid, often clear or with a distinctive blue/green tint. The precision of 1.000 is remarkable — zero false PVC predictions. The model has found highly discriminative PVC-specific features. Also only 23 test samples, so this result has higher variance.
+
+### HDPE — F1: 0.9038 (Good)
+Physically: HDPE is opaque, often white/colored rigid plastic. Distinctive but can resemble PS. High recall (0.922) means the model catches most HDPE — missing 4 items out of 51.
+
+### PS — F1: 0.9032 (Good, but Recall=0.840)
+Recall of 0.840 means 8 out of 50 PS items were missed. Polystyrene (foam cups, rigid clear plastic) can look similar to HDPE or PET depending on the product form. The model's high PS precision (97.67%) means it rarely falsely labels other plastics as PS, but it does miss real PS items. This suggests PS features learned are conservative.
+
+### PET — F1: 0.8315 (Acceptable, low Precision=0.787)
+PET's low precision (78.7%) means the model raises too many PET false alarms — it predicts PET when the actual plastic is something else. This likely happens because PET (clear bottles) overlaps visually with PVC (clear sheets) and some clear HDPE forms. The model errs toward predicting PET for transparent plastics.
+
+### PP — F1: 0.6061 (Problematic)
+The root issue is data starvation. PP (polypropylene, used in yogurt containers, bottle caps, straws) has diverse physical forms that don't share one unified visual signature as strongly as LDPE does. With only 119 training images across many product types, the model cannot generalize well. This is not a model architecture failure — it is a training data failure.
+
+---
+
+## 9. Benchmark Achievement Summary
+
+| Metric | Target (Good) | Actual (EffNet-B0) | Verdict |
+|---|---|---|---|
+| Test Accuracy | >85% | 88.94% | ✅ Passes |
+| Macro F1 | >0.82 | 0.8641 | ✅ Passes (marginally) |
+| Worst-class F1 | >0.70 | 0.6061 (PP) | ❌ Fails |
+| Cohen's Kappa | >0.80 | 0.8636 | ✅ Passes |
+| Top-3 Accuracy | >95% | 97.45% | ✅ Passes |
+
+**4 out of 5 benchmarks met.** The single failure (PP F1) is a data limitation, not a fundamental model architecture problem.
+
+---
+
+## 10. Honest Verdict
+
+**What is true:**
+- For a ~2,300 image dataset using transfer learning, these results are genuinely good and align with published research on similar plastic/waste classification tasks.
+- EfficientNet-B0 is clearly the better choice for deployment — better metrics, smaller size, more reliable generalization.
+- The training pipeline works correctly. The GPU optimizations, early stopping, and weighted sampling all functioned as intended.
+
+**What needs qualification:**
+- These metrics were produced on a 235-image test set from the same source/distribution as training. Real-world accuracy will be lower, possibly by 5–15%.
+- PP classification is unreliable (F1=0.606 on only 16 test samples). Do not present this as a confident result.
+- Overfitting is present in both models. More data is the primary fix.
+- "88.94% accuracy" should always be presented alongside "Macro F1 = 0.864" because accuracy alone is misleading with an imbalanced dataset.
+
+**What this means for Phase 3:**
+Deploy EfficientNet-B0 with these caveats built into the API:
+1. Return the full confidence vector (all 6 probabilities), not just the top prediction.
+2. Flag predictions with max confidence < 0.70 as "uncertain — please verify".
+3. Log all low-confidence predictions for future dataset expansion.
+4. Display "PP detection accuracy is limited; if in doubt, check the recycling code on the package" in the UI for PP predictions.
