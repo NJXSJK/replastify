@@ -16,16 +16,22 @@ _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 # ── Inference transform (deterministic — NOT the augmented train transform) ──
-# Matches val_tfm in 03_train_model.py:  Resize(256) → CenterCrop(224)
+# Sizes driven by config to stay in sync if model is retrained at different input size
+# Matches val_tfm: Resize(resize_size) → CenterCrop(input_size)
 _inference_transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
+    transforms.Resize(settings.resize_size),
+    transforms.CenterCrop(settings.input_size),
     transforms.ToTensor(),
     transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
 ])
 
+# ── Device selection ─────────────────────────────────────────────────────────
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 # ── Singleton model reference ────────────────────────────────────────────────
 _model: nn.Module | None = None
+
 
 
 # ── Return types ─────────────────────────────────────────────────────────────
@@ -76,8 +82,9 @@ def load_model() -> nn.Module:
     Load model weights from disk. Called once at application startup via lifespan.
 
     Design notes:
-    - map_location="cpu": model was GPU-trained on Kaggle; server is CPU-only
+    - map_location=device: loads to CUDA/CPU dynamically
     - weights_only=True: security hardening — prevents pickle-based code execution
+    - model.to(device): transfers model parameters to the selected device
     - model.eval(): disables Dropout randomness and BatchNorm batch-statistics
     """
     global _model
@@ -85,10 +92,11 @@ def load_model() -> nn.Module:
 
     state_dict = torch.load(
         settings.model_path,
-        map_location="cpu",
+        map_location=device,
         weights_only=True,
     )
     model.load_state_dict(state_dict)
+    model = model.to(device)
     model.eval()
     _model = model
     return _model
@@ -111,14 +119,15 @@ def predict(image: Image.Image) -> PredictionResult:
 
     Steps:
       1. Apply val transform (Resize → CenterCrop → ToTensor → Normalize)
-      2. Forward pass under no_grad (no computation graph — prevents memory leak)
-      3. Softmax over logits → probabilities
-      4. Build top-1, top-3, uncertainty flags
+      2. Move input tensor to active device (CPU or GPU)
+      3. Forward pass under no_grad (no computation graph — prevents memory leak)
+      4. Softmax over logits → probabilities
+      5. Build top-1, top-3, uncertainty flags
     """
     model = get_model()
 
-    # Preprocess: [H, W, C] PIL → [1, 3, 224, 224] tensor
-    tensor = _inference_transform(image).unsqueeze(0)
+    # Preprocess: [H, W, C] PIL → [1, 3, 224, 224] tensor, moved to model's device
+    tensor = _inference_transform(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
         logits = model(tensor)                         # [1, 6]
