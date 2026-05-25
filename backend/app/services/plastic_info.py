@@ -1,4 +1,5 @@
 # backend/app/services/plastic_info.py
+import copy
 
 PLASTIC_DATABASE: dict[str, dict] = {
     "HDPE": {
@@ -116,8 +117,9 @@ def get_plastic_info(class_name: str) -> dict:
     """
     Return the full info dict for a plastic type.
     Raises KeyError with a clear message if class_name is not recognised.
+    Returns a deep copy to ensure mutable global state safety.
     """
     if class_name not in PLASTIC_DATABASE:
         valid = list(PLASTIC_DATABASE.keys())
         raise KeyError(f"Unknown plastic type: '{class_name}'. Valid types: {valid}")
-    return PLASTIC_DATABASE[class_name]
+    return copy.deepcopy(PLASTIC_DATABASE[class_name])
