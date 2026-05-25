@@ -28,33 +28,33 @@ async def validate_and_load_image(file: UploadFile) -> Image.Image:
             ),
         )
 
-    # 2. Read all bytes into memory
-    contents = await file.read()
+    # 2. Read bytes incrementally in 1 MB chunks to prevent memory exhaustion DoS
+    contents = bytearray()
+    chunk_size = 1024 * 1024  # 1 MB chunk
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        contents.extend(chunk)
+        if len(contents) > MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Max allowed: {settings.max_file_size_mb} MB",
+            )
 
-    # 3. Size check — before doing any image processing
-    if len(contents) > MAX_BYTES:
-        size_mb = len(contents) / (1024 * 1024)
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"File too large ({size_mb:.1f} MB). "
-                f"Max allowed: {settings.max_file_size_mb} MB"
-            ),
-        )
-
-    # 4. Image validity check
+    # 3. Image validity check
     # PIL's verify() reads to end of stream — must re-open from bytes after calling it
     try:
         image = Image.open(io.BytesIO(contents))
         image.verify()                           # raises on truncated / corrupt files
         image = Image.open(io.BytesIO(contents)) # re-open: verify() exhausts the stream
-    except (UnidentifiedImageError, Exception) as e:
+    except Exception as e:
         raise HTTPException(
             status_code=422,
             detail=f"Cannot process image: {str(e)}",
         )
 
-    # 5. Normalize to RGB
+    # 4. Normalize to RGB
     # Model was trained on 3-channel RGB. Handles: RGBA PNGs, grayscale, CMYK, palette
     image = image.convert("RGB")
 
