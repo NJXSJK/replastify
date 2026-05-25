@@ -1,9 +1,10 @@
 # backend/app/routes/predict.py
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
+from typing import Literal
 
 from app.config import settings
-from app.services.classifier import predict
+from app.services.classifier import predict, get_model
 from app.services.gemini import get_ai_suggestions
 from app.services.plastic_info import PLASTIC_DATABASE, get_plastic_info
 from app.utils.image_utils import validate_and_load_image
@@ -46,7 +47,7 @@ class SuggestionsResponse(BaseModel):
     reuse_ideas: list[str]
     eco_alternatives: list[str]
     environmental_note: str
-    source: str  # "ai" | "static"
+    source: Literal["ai", "static"]
 
 
 class PredictResponse(BaseModel):
@@ -126,7 +127,6 @@ async def predict_plastic(file: UploadFile = File(..., description="Image of the
 @router.get("/health", response_model=HealthResponse, summary="Server and model health check")
 async def health_check():
     """Returns current status of the server and loaded model."""
-    from app.services.classifier import get_model
     try:
         get_model()
         model_loaded = True
