@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     model_path: Path = Path("models/best_efficientnet_b0.pth")
     model_name: str = "efficientnet_b0"
     num_classes: int = 6
+    # Input size used during training — changing this requires retraining
+    input_size: int = 224     # EfficientNet-B0 trained at 224×224
+    resize_size: int = 256    # = input_size + 32 (standard val crop pipeline)
 
     # ── Inference thresholds (from Phase 2 analysis) ─────────
     # PP class has F1=0.606 — flag anything below 70% as uncertain
@@ -25,7 +28,7 @@ class Settings(BaseSettings):
     allowed_extensions: set[str] = {"jpg", "jpeg", "png", "webp"}
 
     # ── Paths ────────────────────────────────────────────────
-    temp_dir: Path = Path("temp")
+    # (temp_dir removed — uploads are processed in-memory via BytesIO, no disk writes needed)
 
     # ── Gemini API ───────────────────────────────────────────
     # Leave empty to disable Gemini — static knowledge base used as fallback

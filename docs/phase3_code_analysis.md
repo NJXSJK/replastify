@@ -1,270 +1,105 @@
-# Phase 3 — Backend Code Analysis
-**Date:** 2026-05-25 | **Status:** Implementation Complete | **Files:** 7 Python modules + Dockerfile
+# Phase 3 — Complete Deep Code Analysis & Unified Fix Plan
+**Date:** 2026-05-25 | **Scope:** End-to-end Python backend codebase, security, concurrency, and resource constraints.
 
 ---
 
-## 1. Overview
+## Part 1 — Expanded Issue Registry & Security Audit
 
-Phase 3 produced a fully modular FastAPI backend that wires together the Phase 2 EfficientNet-B0 model, a static plastic knowledge base, and an optional Gemini AI enrichment layer. All 11 Python files pass syntax validation. The server is ready to run once `best_efficientnet_b0.pth` is placed in `backend/models/`.
+This section details all vulnerabilities, concurrency issues, performance bottlenecks, and code quality issues identified in the backend.
 
-### File Inventory
+### 1.1 Critical Vulnerabilities & Concurrency Bugs
 
-| File | Lines | Role |
-|---|---|---|
-| `app/config.py` | 45 | All settings from `.env` via pydantic-settings |
-| `app/utils/image_utils.py` | 58 | Upload validation → clean RGB PIL Image |
-| `app/services/plastic_info.py` | 110 | Static knowledge base (6 plastic types) |
-| `app/services/classifier.py` | 169 | EfficientNet-B0 singleton + inference |
-| `app/services/gemini.py` | 151 | Gemini AI with fallback |
-| `app/routes/predict.py` | 157 | 3 API endpoints + Pydantic response models |
-| `app/main.py` | 114 | App factory, lifespan, CORS, error handler |
+#### ISSUE-01 · Memory Exhaustion DoS via Unbounded File Reads (`image_utils.py:32`)
+- **Severity:** High
+- **Vulnerability:** `contents = await file.read()` reads the entire uploaded file into RAM in a single operation.
+- **Root Cause:** Size validation occurs *after* the file is fully read into memory.
+- **Impact:** A malicious client uploading a 1 GB file will cause the server to allocate 1 GB of memory. Under high concurrency or limited RAM, this immediately triggers a kernel Out-Of-Memory (OOM) event and crashes the entire Docker container (Denial of Service).
+- **Fix:** Read the stream incrementally in 1 MB chunks. Raise an HTTP 413 error immediately if the accumulated bytes exceed the configured limit.
 
----
+#### ISSUE-02 · Blocking CPU-bound Inference on Async Event Loop (`routes/predict.py:83`)
+- **Severity:** High
+- **Vulnerability:** `result = predict(image)` runs PyTorch model inference directly inside an `async def` handler.
+- **Root Cause:** FastAPI uses a single-threaded event loop for async routes. Regular sync calls block the loop.
+- **Impact:** The event loop is blocked for 80-200ms per prediction. While one prediction is running, no other requests, background tasks, or health checks can run.
+- **Fix:** Wrap the synchronous `predict` call in `asyncio.to_thread` to run it in FastAPI's default worker thread pool.
 
-## 2. Request Lifecycle — `POST /predict`
-
-Every image upload travels through 5 clearly separated stages:
-
-```
-Client uploads image
-        │
-        ▼
-[1] image_utils.validate_and_load_image()
-    ├─ Extension check (.jpg/.png/.webp only)        → 400 if bad
-    ├─ Size check (≤ 10 MB)                          → 413 if large
-    ├─ PIL.verify() (corrupt/truncated detection)    → 422 if broken
-    └─ .convert("RGB") (normalises RGBA/grayscale)
-        │
-        ▼
-[2] classifier.predict(image)
-    ├─ Val transform: Resize(256) → CenterCrop(224) → ToTensor → Normalize
-    ├─ Forward pass under torch.no_grad()
-    ├─ Softmax over 6 logits → probabilities
-    ├─ Top-1 class + confidence
-    ├─ Top-3 sorted predictions
-    └─ Uncertainty flag (conf < 0.70) + PP disclaimer
-        │
-        ▼
-[3] plastic_info.get_plastic_info(class_name)
-    └─ Returns static dict: resin code, uses, recyclability, health, fun_fact
-        │
-        ▼
-[4] gemini.get_ai_suggestions() — async, max 8 seconds
-    ├─ If API key missing  → static fallback immediately
-    ├─ If Gemini responds  → parse JSON → return suggestions + source="ai"
-    ├─ If timeout          → static fallback + log warning
-    └─ If any exception    → static fallback + log warning
-        │
-        ▼
-[5] Assemble PredictResponse (Pydantic model)
-    └─ Return JSON to client
-```
+#### ISSUE-03 · Global Exception Handler Swallows Custom API Errors (`main.py:89`)
+- **Severity:** Medium
+- **Vulnerability:** The general `@app.exception_handler(Exception)` catches and masks all exceptions, including `HTTPException`.
+- **Root Cause:** FastAPI/Starlette `HTTPException` is a subclass of `Exception`. Registering a catch-all handler without explicitly returning or re-raising HTTP exceptions overrides their custom status codes and details.
+- **Impact:** Validation errors (400, 413, 422) raised within utility functions are returned to the user as generic "500 Internal Server Error" responses with masked detail messages.
+- **Fix:** Explicitly inspect the exception class and return the appropriate HTTP response structure if it is a Starlette or FastAPI `HTTPException`.
 
 ---
 
-## 3. Design Pattern Analysis
+### 1.2 Performance & System Gaps
 
-### 3.1 Singleton Pattern — `classifier.py`
+#### ISSUE-04 · Hardcoded CPU Inference (`classifier.py:88`)
+- **Severity:** Medium
+- **Vulnerability:** `map_location="cpu"` is hardcoded for model weight loading, and input tensors are not transferred to the active device.
+- **Root Cause:** Assumption that deployment is CPU-only, ignoring GPU availability in local or staging environments.
+- **Impact:** The backend fails to utilize CUDA acceleration even if GPUs are present.
+- **Fix:** Add dynamic device auto-detection (`cuda` vs `cpu`) and explicitly transfer both the model and the preprocessed image tensor to the detected device.
 
-The model is loaded **once at startup** and reused for all requests via a module-level `_model` variable:
+#### ISSUE-05 · Lack of Input/Output Logging (`routes/predict.py`)
+- **Severity:** Medium
+- **Vulnerability:** API routes process uploads and return predictions silently without logging.
+- **Root Cause:** Omission of operational logging.
+- **Impact:** Operational blindness. Administrators cannot monitor model performance, detect drift, or debug user-reported misclassifications in production.
+- **Fix:** Add structured `logger.info` stating the identified class, model confidence, uncertainty status, and the suggestion provider source.
 
-```python
-_model: nn.Module | None = None
-
-def load_model() -> nn.Module:   # called once in lifespan
-    global _model
-    ...
-    _model = model
-    return _model
-
-def get_model() -> nn.Module:    # called on every request
-    if _model is None:
-        raise RuntimeError(...)
-    return _model
-```
-
-**Why correct:** Loading a 20 MB PyTorch model takes ~0.5–1s. Loading it per-request would make the API unusable. The singleton is thread-safe because Python's GIL prevents concurrent writes to the global during loading, and all reads happen after startup completes.
-
-**Risk:** If the server ever spawns multiple worker processes (e.g. `--workers 4`), each process gets its own copy of `_model`. This multiplies memory usage. The current `--workers 1` Dockerfile setting prevents this.
+#### ISSUE-06 · Missing Class Consistency Verification on Startup (`main.py:40`)
+- **Severity:** Medium
+- **Vulnerability:** No automated check to ensure classifier classes map to knowledge base entries.
+- **Root Cause:** Lack of dependency validation during startup.
+- **Impact:** If `CLASS_NAMES` in `classifier.py` and `PLASTIC_DATABASE` in `plastic_info.py` drift, the application starts successfully but throws an uncaught KeyError at runtime when a mismatched class is predicted.
+- **Fix:** Add a validation loop in the lifespan startup handler to assert that every class in `CLASS_NAMES` exists as a key in `PLASTIC_DATABASE`.
 
 ---
 
-### 3.2 Fail-Fast Startup — `main.py`
+### 1.3 Code Quality & Dead Code
 
-```python
-if not settings.model_path.exists():
-    raise FileNotFoundError(...)
-```
+#### ISSUE-07 · Dead Code: Unused Temp Directory (`main.py:41`)
+- **Severity:** Low
+- **Vulnerability:** Startup lifespan creates a `temp/` folder on disk that is never used.
+- **Root Cause:** Legacy design where uploaded files were saved to disk before classification.
+- **Impact:** Wasted storage/IO setup, creates confusion for maintainers.
+- **Fix:** Remove `temp_dir` from `config.py` and cleanup directories creation in `main.py`.
 
-The server **refuses to start** if the model file is missing, rather than starting and crashing on the first request with an opaque 500 error. This is a critical operational improvement — it gives the developer an immediate, actionable error message.
-
----
-
-### 3.3 Lifespan Context Manager — `main.py`
-
-```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    load_model()    # startup
-    yield           # server runs
-    # shutdown code here if needed
-```
-
-This replaces the deprecated `@app.on_event("startup")` pattern (deprecated since FastAPI 0.93). The `yield` is the key — code before `yield` runs on startup, code after runs on shutdown. Currently there is nothing to clean up on shutdown, but the pattern is ready for adding database connections or cache flushes in future.
+#### ISSUE-08 · Type Constraint Gaps in API Schemas (`routes/predict.py:60`)
+- **Severity:** Low
+- **Vulnerability:** Fields like `HealthResponse.status` use unconstrained strings.
+- **Root Cause:** Omission of strict schema typing.
+- **Impact:** API documentation shows generic string types, and invalid status values could pass validation.
+- **Fix:** Apply `Literal` constraints (e.g. `status: Literal["ok", "degraded"]`).
 
 ---
 
-### 3.4 Gemini as Decoupled Optional Layer — `gemini.py`
+## Part 2 — Action Plan & Rethinking
 
-Three design decisions make Gemini production-safe:
+We will implement all fixes sequentially in a single pass to ensure consistency.
 
-1. **Lazy client initialisation:** `_get_client()` returns `None` if no API key is set, without importing `google.genai` at all. This means the server works even if the package isn't installed.
+### 2.1 Implementation Checklist
 
-2. **Thread-pool offload:** `loop.run_in_executor(None, ...)` runs the synchronous Gemini SDK call in a thread, leaving the async event loop free to handle other requests during the API round-trip.
+- [ ] **Step 1: Configuration (`config.py`)**
+  - Verify `temp_dir` is removed.
+  - Verify model dimensions are present.
 
-3. **Total exception swallowing:** Every failure path (timeout, quota exceeded, network error, invalid API key, JSON parse failure) logs a warning and returns the static fallback. The `/predict` endpoint **always returns HTTP 200** with a complete response — Gemini is never visible to the client as a failure point.
+- [ ] **Step 2: Security & Helper Optimizations (`utils/image_utils.py`)**
+  - Replace `file.read()` with chunk-by-chunk stream loading (1 MB buffer).
+  - Enforce size bounds during the streaming process to mitigate DoS.
+  - Clean up redundant exception handlers.
 
-**Minor concern:** Swallowing all exceptions means a misconfigured API key produces no visible error to the developer during testing. The log warning (`logger.warning(...)`) is the only signal. Consider adding a startup warning if the key looks invalid.
+- [ ] **Step 3: Device-Aware Model Inference (`services/classifier.py`)**
+  - Auto-detect the target device (`cuda` or `cpu`).
+  - Move model weights and input tensors to the target device.
 
----
+- [ ] **Step 4: API Routes Verification & Blocking Call Offloading (`routes/predict.py`)**
+  - Use `asyncio.to_thread` for the synchronous `predict` call.
+  - Apply `Literal` constraint to `HealthResponse.status`.
+  - Add structured request logging with fields: `filename`, `prediction`, `confidence`, `is_uncertain`, `suggestions_source`.
 
-### 3.5 Image Processing Pipeline — `image_utils.py`
-
-Two subtle correctness decisions:
-
-**The verify-then-reopen pattern:**
-```python
-image = Image.open(io.BytesIO(contents))
-image.verify()                              # ← reads entire stream to end
-image = Image.open(io.BytesIO(contents))   # ← must re-open from same bytes
-```
-`PIL.verify()` is destructive — it exhausts the stream. Re-opening from the same `contents` bytes is mandatory. Forgetting the second open would pass the corruption check but then crash on `.convert("RGB")`.
-
-**Always converting to RGB:**
-The model's first convolutional layer expects exactly 3 channels. Without `convert("RGB")`:
-- RGBA PNG → 4 channels → dimension mismatch crash
-- Grayscale → 1 channel → dimension mismatch crash
-- CMYK → 4 channels → dimension mismatch crash
-
----
-
-### 3.6 Transform Correctness — `classifier.py`
-
-```python
-_inference_transform = transforms.Compose([
-    transforms.Resize(256),       # matches: Resize(input_size + 32) where input_size=224
-    transforms.CenterCrop(224),   # matches: CenterCrop(input_size)
-    transforms.ToTensor(),
-    transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
-])
-```
-
-This exactly mirrors `val_tfm` in `03_train_model.py`. Cross-verified against the training script. Using the training transform (which includes `RandomResizedCrop` and `RandomHorizontalFlip`) at inference would make the same image produce different predictions on different calls — a silent but serious correctness bug.
-
----
-
-### 3.7 Pydantic Response Models — `routes/predict.py`
-
-Six Pydantic models define the full response schema. Benefits:
-- FastAPI auto-generates accurate Swagger UI at `/docs` with no extra work
-- Response validation catches shape mismatches at development time, not in production
-- Type annotations serve as living documentation
-
-The `source: str` field in `SuggestionsResponse` (`"ai"` or `"static"`) lets the frontend optionally show a badge indicating whether suggestions came from Gemini or the static knowledge base.
-
----
-
-## 4. Potential Issues & Gaps
-
-### 4.1 `map_location="cpu"` Always — Moderate
-The current `classifier.py` always loads the model onto CPU regardless of whether a GPU is available on the server. For a local development machine with a GPU, inference would be slower than necessary. A simple fix:
-
-```python
-device = "cuda" if torch.cuda.is_available() else "cpu"
-state_dict = torch.load(settings.model_path, map_location=device, weights_only=True)
-model = model.to(device)
-# Also move tensor in predict(): tensor = tensor.to(device)
-```
-
-For Phase 3 (local dev / demo deployment), CPU is fine. For Phase 4 deployment, this should be addressed.
-
-### 4.2 No Rate Limiting
-A user can spam `/predict` with hundreds of requests per second. Each request runs a full EfficientNet forward pass (~50–100ms on CPU). This could saturate the server. For a student project this is acceptable, but production would need `slowapi` or a reverse proxy rate limit.
-
-### 4.3 No Input Logging for Debugging
-Currently there is no log of what image was uploaded or what prediction was returned. In production, logging `{plastic_type, confidence, source}` per request would make debugging misclassifications much easier.
-
-### 4.4 `GET /health` Has a Local Import
-```python
-@router.get("/health")
-async def health_check():
-    from app.services.classifier import get_model  # ← local import
-```
-This works but is unusual. The import should be at the top of the file. It was structured this way to avoid a circular import concern that doesn't actually exist here — move it to the top.
-
-### 4.5 `SuggestionsResponse.source` Has No Enum Validation
-`source: str` accepts any string. If `get_ai_suggestions` ever returned a typo like `"statiic"`, Pydantic would not catch it. Should be `source: Literal["ai", "static"]` for strict validation.
-
-### 4.6 `all_probabilities` Always Returned
-The full 6-probability dict is returned on every `/predict` response. This is useful for debugging but unnecessary data for the frontend (which only needs top-3). Consider making it optional or removing it from the production response to reduce payload size.
-
----
-
-## 5. Security Assessment
-
-| Concern | Status | Implementation |
-|---|---|---|
-| API key in code | ✅ Safe | Loaded from `.env`, not hardcoded |
-| `.env` in git | ✅ Safe | `.gitignore` excludes it |
-| `torch.load` pickle injection | ✅ Mitigated | `weights_only=True` |
-| Path traversal via filename | ✅ Safe | Bytes read to memory, filename never used |
-| Large file DoS | ✅ Mitigated | 10 MB check before processing |
-| Corrupt file crash | ✅ Handled | `PIL.verify()` catches it |
-| CORS wildcard `*` | ✅ Not used | Explicit origin allowlist |
-| Raw traceback to client | ✅ Prevented | Global exception handler returns generic 500 |
-
----
-
-## 6. What's Working Well
-
-- **Full separation of concerns** — each file has one job. Adding a new model or a new data source doesn't require touching other files.
-- **Gemini never breaks the API** — the fallback chain is watertight.
-- **Phase 2 findings are embedded in the code** — the PP disclaimer and 0.70 confidence threshold directly implement the analysis from `phase2_results_analysis.md`.
-- **Syntax-verified** — all 11 files passed AST syntax check before commit.
-- **4 incremental commits** — no single large dump; history is traceable.
-
----
-
-## 7. Before Running Locally
-
-```bash
-# 1. Copy model file (download from Kaggle)
-cp ~/Downloads/best_efficientnet_b0.pth backend/models/
-
-# 2. Set up environment
-cd backend
-cp .env.example .env
-# Optionally add: GEMINI_API_KEY=your_key
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Run
-uvicorn app.main:app --reload --port 8000
-
-# 5. Verify
-curl http://localhost:8000/health
-# Open: http://localhost:8000/docs
-```
-
----
-
-## 8. Fixes to Apply Before Phase 4
-
-| Priority | Fix |
-|---|---|
-| High | Add `device` auto-detection (CPU vs GPU) in `classifier.py` |
-| Medium | Move `get_model` import to top of `routes/predict.py` |
-| Medium | Change `source: str` to `source: Literal["ai", "static"]` |
-| Low | Add per-request logging (`plastic_type`, `confidence`, `source`) |
-| Low | Consider removing `all_probabilities` from production response |
+- [ ] **Step 5: App Factory Lifecycle & Lifespan Context Manager (`main.py`)**
+  - Add `CLASS_NAMES` to `PLASTIC_DATABASE` check at startup.
+  - Remove folder creation logic for `temp_dir`.
+  - Update `global_exception_handler` to properly pass `HTTPException` detail and status codes.

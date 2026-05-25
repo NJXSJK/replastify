@@ -3,28 +3,39 @@ import json
 import asyncio
 import re
 import logging
+import threading
 
 from app.config import settings
 from app.services.plastic_info import get_plastic_info
 
 logger = logging.getLogger(__name__)
 
+# Required keys that Gemini's response JSON must contain
+_REQUIRED_KEYS = {"recycling_tips", "reuse_ideas", "eco_alternatives", "environmental_note"}
+
 # Lazy-initialised Gemini client singleton
-_client = None
+_client: "genai.Client | None" = None
+_client_lock = threading.Lock()  # protects against concurrent initialisation
 
 
 def _get_client():
     """
     Return a Gemini client, or None if no API key is configured.
-    Lazy-initialised so startup doesn't fail if google-genai isn't installed.
+    Thread-safe: uses a lock to prevent concurrent initialisation on first request.
     """
     global _client
-    if _client is None and settings.gemini_api_key:
-        try:
-            from google import genai
-            _client = genai.Client(api_key=settings.gemini_api_key)
-        except ImportError:
-            logger.warning("google-genai package not installed. Gemini disabled.")
+    if _client is not None or not settings.gemini_api_key:
+        return _client
+    with _client_lock:
+        # Double-checked locking: re-check inside lock in case another thread
+        # initialised it while we were waiting
+        if _client is None:
+            try:
+                from google import genai
+                _client = genai.Client(api_key=settings.gemini_api_key)
+                logger.info("Gemini client initialised successfully")
+            except ImportError:
+                logger.warning("google-genai package not installed. Gemini disabled.")
     return _client
 
 
@@ -58,25 +69,39 @@ Be specific and actionable. Each item must be one sentence or less."""
 
 def _parse_gemini_response(text: str) -> dict | None:
     """
-    Extract the JSON object from Gemini's response text.
-    Handles cases where the model wraps output in markdown code fences.
-    Returns None if parsing fails entirely.
+    Extract and validate the JSON object from Gemini's response text.
+    Returns None if:
+      - Text is not valid JSON
+      - JSON is valid but missing required keys
     """
+    parsed = None
+
     # Direct parse first
     try:
-        return json.loads(text.strip())
+        parsed = json.loads(text.strip())
     except json.JSONDecodeError:
         pass
 
     # Extract first {...} block (handles markdown fences or preamble text)
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
+    if parsed is None:
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
 
-    return None
+    if parsed is None:
+        return None
+
+    # Validate required schema keys — Gemini sometimes returns valid JSON
+    # but with unexpected key names (e.g. "tips" instead of "recycling_tips")
+    missing = _REQUIRED_KEYS - parsed.keys()
+    if missing:
+        logger.warning(f"Gemini JSON missing required keys: {missing}")
+        return None
+
+    return parsed
 
 
 def _static_fallback(plastic_type: str) -> dict:
