@@ -1,4 +1,6 @@
 # backend/app/routes/predict.py
+import asyncio
+import logging
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from typing import Literal
@@ -9,6 +11,7 @@ from app.services.gemini import get_ai_suggestions
 from app.services.plastic_info import PLASTIC_DATABASE, get_plastic_info
 from app.utils.image_utils import validate_and_load_image
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -57,7 +60,7 @@ class PredictResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: str
+    status: Literal["ok", "degraded"]
     model_loaded: bool
     model: str
     classes: int
@@ -80,8 +83,8 @@ async def predict_plastic(file: UploadFile = File(..., description="Image of the
     # Step 1: Validate and decode image → raises HTTPException on bad input
     image = await validate_and_load_image(file)
 
-    # Step 2: ML inference
-    result = predict(image)
+    # Step 2: ML inference (offloaded to thread to keep the event loop non-blocking)
+    result = await asyncio.to_thread(predict, image)
 
     # Step 3: Static plastic knowledge
     info = get_plastic_info(result.plastic_type)
@@ -91,6 +94,12 @@ async def predict_plastic(file: UploadFile = File(..., description="Image of the
         plastic_type=result.plastic_type,
         confidence=result.confidence,
         is_uncertain=result.is_uncertain,
+    )
+
+    # Log prediction details for auditability/drift analysis
+    logger.info(
+        f"Prediction: file='{file.filename}' -> detected='{result.plastic_type}' "
+        f"(conf={result.confidence:.2f}, uncertain={result.is_uncertain}, suggestions_source='{source}')"
     )
 
     # Step 5: Assemble and return
