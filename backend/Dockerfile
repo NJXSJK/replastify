@@ -13,15 +13,15 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps first — this layer is cached if requirements.txt is unchanged
+# Install CPU-specific PyTorch wheels to keep Docker image size optimized (~800MB vs ~3.8GB)
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
-
-# Create temp directory for uploads
-RUN mkdir -p temp
 
 EXPOSE 8000
 
