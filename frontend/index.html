@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- SEO Meta Tags -->
+  <title>Replastify — Intelligent Plastic Identification & Recycling Guide</title>
+  <meta name="description" content="Identify plastic types instantly using computer vision. Upload or scan any plastic item to get properties, decomposition facts, and customized recycling guides.">
+  <meta name="keywords" content="plastic recycling, resin code identifier, green alternative, plastic pollution, machine learning classification, waste management">
+  <meta name="author" content="Replastify Team">
+  
+  <!-- Stylesheets -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <div class="app-container">
+    
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-container">
+        <!-- SVG Recycle Leaf Logo -->
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 11V5a2 2 0 0 1 2-2h4M17 13v6a2 2 0 0 1-2 2H9M2 9h20M2 15h20" />
+          <path d="M12 2v20" />
+        </svg>
+        <span class="logo-text">Replastify</span>
+      </div>
+      
+      <div class="scan-counter" id="scan-counter-container" title="Number of items identified this session">
+        Scans this session: <span class="count" id="session-scan-count">0</span>
+      </div>
+    </header>
+
+    <!-- Main Section -->
+    <main class="dashboard-grid">
+      
+      <!-- Left Panel: Input & Controls -->
+      <section class="glass-panel" id="input-panel">
+        
+        <!-- Tab selector -->
+        <div class="tab-header">
+          <button class="tab-btn active" id="tab-upload-btn" onclick="switchInputTab('upload')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+            </svg>
+            Upload Image
+          </button>
+          <button class="tab-btn" id="tab-camera-btn" onclick="switchInputTab('camera')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+              <circle cx="12" cy="13" r="4"/>
+            </svg>
+            Live Scanner
+          </button>
+        </div>
+
+        <!-- Ingestion Containers -->
+        <div class="upload-container" id="upload-tab-content">
+          <!-- Dropzone -->
+          <div class="dropzone" id="drop-zone" onclick="triggerFileInput()">
+            <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+            <h3>Drag & drop your image here</h3>
+            <p>Supports JPG, JPEG, PNG, or WEBP (Max 10 MB)</p>
+            <button class="btn btn-secondary" style="width: auto; margin-top: 0.5rem;">Select File</button>
+          </div>
+          <input type="file" id="file-input" accept="image/jpeg,image/jpg,image/png,image/webp" onchange="handleFileSelect(event)">
+        </div>
+
+        <div class="camera-container" id="camera-tab-content">
+          <div class="camera-viewport-wrapper">
+            <video class="camera-viewport" id="camera-stream" autoplay playsinline></video>
+            <div class="scan-overlay">
+              <div class="scanner-line" id="scanner-line-indicator"></div>
+            </div>
+          </div>
+          <button class="btn" id="capture-image-btn" onclick="captureAndClassify()">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+            Identify Item
+          </button>
+        </div>
+
+      </section>
+
+      <!-- Right Panel: Results & Information -->
+      <section class="glass-panel" id="results-panel">
+        
+        <!-- Default State: No prediction yet -->
+        <div class="placeholder-view" id="results-placeholder">
+          <svg class="placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <circle cx="10" cy="13" r="2"/>
+            <path d="m20 17-1.12-1.12a2 2 0 0 0-2.83 0L12 20"/>
+          </svg>
+          <h2>Awaiting Classification</h2>
+          <p style="margin-top: 0.5rem; max-width: 280px;">Upload an image or start the live scanner to identify plastic details and environmental impact.</p>
+        </div>
+
+        <!-- Skeleton Loading State -->
+        <div class="skeleton-loader" id="results-skeleton">
+          <div class="skeleton-item skeleton-media"></div>
+          <div class="skeleton-item skeleton-title"></div>
+          <div class="skeleton-item skeleton-text"></div>
+          <div class="skeleton-item skeleton-text"></div>
+          <div class="skeleton-item skeleton-text short"></div>
+        </div>
+
+        <!-- Active State: Prediction results display -->
+        <div class="result-view" id="results-content">
+          
+          <!-- Image preview -->
+          <div class="preview-card">
+            <img class="preview-img" id="result-preview-image" src="" alt="Identified Plastic Item">
+            <div class="confidence-overlay">
+              <span class="status-dot"></span>
+              <span id="result-confidence-text">98% Match</span>
+            </div>
+          </div>
+
+          <!-- Title and Badge -->
+          <div class="result-header">
+            <div>
+              <h1 class="plastic-type-name" id="result-plastic-name">PET</h1>
+              <p style="color: var(--text-secondary); font-size: 0.95rem;" id="result-fullname-text">Polyethylene Terephthalate</p>
+            </div>
+            <div class="plastic-resin-badge" id="result-resin-badge">1</div>
+          </div>
+
+          <!-- Alert box for Uncertainty -->
+          <div class="alert-box alert-warning" id="result-uncertainty-alert" style="display: none;">
+            <svg class="alert-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+              <line x1="12" y1="9" x2="12" y2="13"/>
+              <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            <span id="result-uncertainty-message">Identification confidence is low. Please verify resin details.</span>
+          </div>
+
+          <!-- Specific parameters -->
+          <div class="specs-grid">
+            <div class="spec-item">
+              <div class="spec-label">Recyclability</div>
+              <div class="spec-val highlight" id="result-recyclability-text">Widely Accepted</div>
+            </div>
+            <div class="spec-item">
+              <div class="spec-label">Decomposition</div>
+              <div class="spec-val" id="result-decomposition-text">450 Years</div>
+            </div>
+            <div class="spec-item">
+              <div class="spec-label">Safety Rating</div>
+              <div class="spec-val" id="result-safety-score">5 / 5</div>
+            </div>
+          </div>
+
+          <!-- Probability tracks -->
+          <div class="probability-section">
+            <h4 style="font-size: 0.9rem; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.25rem;">Probability Distribution</h4>
+            <div id="probability-distribution-rows">
+              <!-- Dynamically populated via js -->
+            </div>
+          </div>
+
+          <!-- Accordion panel lists -->
+          <div class="details-tabs">
+            
+            <div class="details-card" id="details-card-uses">
+              <button class="details-trigger" onclick="toggleDetailsCard('uses')">
+                Common Uses
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="details-content">
+                <div class="details-content-inner">
+                  <ul class="details-list" id="result-uses-list"></ul>
+                </div>
+              </div>
+            </div>
+
+            <div class="details-card" id="details-card-health">
+              <button class="details-trigger" onclick="toggleDetailsCard('health')">
+                Health & Chemical Safety
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="details-content">
+                <div class="details-content-inner" id="result-health-text"></div>
+              </div>
+            </div>
+
+            <div class="details-card" id="details-card-tips">
+              <button class="details-trigger" onclick="toggleDetailsCard('tips')">
+                Recycling Instructions
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="details-content">
+                <div class="details-content-inner">
+                  <ul class="details-list" id="result-tips-list"></ul>
+                </div>
+              </div>
+            </div>
+
+            <div class="details-card" id="details-card-alternatives">
+              <button class="details-trigger" onclick="toggleDetailsCard('alternatives')">
+                Eco-Friendly Alternatives
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="details-content">
+                <div class="details-content-inner">
+                  <ul class="details-list" id="result-alternatives-list"></ul>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="suggestions-source-badge" id="suggestions-source-indicator">
+            Suggestions Source: <span id="suggestions-source-text">Static</span>
+          </div>
+
+          <button class="btn btn-secondary" onclick="resetDashboard()">Scan Another Item</button>
+
+        </div>
+
+      </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>Replastify uses a fine-tuned EfficientNet-B0 deep neural network for plastic classification.</p>
+      <p>&copy; 2026 Replastify. Built to encourage a circular plastic economy. <a href="/docs" target="_blank">Developer API Docs</a></p>
+    </footer>
+
+  </div>
+
+  <!-- Client JavaScript controllers -->
+  <script src="js/app.js"></script>
+
+</body>
+</html>
